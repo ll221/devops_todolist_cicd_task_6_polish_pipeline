@@ -20,6 +20,8 @@ on:
 jobs:
   deploy-helm:
     runs-on: ubuntu-latest
+    # Це поле підхоплює protection rules (required reviewers), налаштовані
+    # в Settings → Environments → {development|staging} у батьківському репозиторії.
     environment:
       name: ${{ inputs.environment }}
       url: https://github.com/${{ github.repository }}/deployments
