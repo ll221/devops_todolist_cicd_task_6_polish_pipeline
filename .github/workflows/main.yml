@@ -1,147 +1,77 @@
-name: python-deployment
-
-run-name: ${{ github.actor }} - ${{ github.ref_name}} -${{ github.sha }}
+name: helm-upgrade
+run-name: ${{ github.actor }} - ${{ github.ref_name }}
 
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
-
-env:
-  PythonVersion: 3.8
-  DockerImageName: todoapp
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      helm-values-path:
+        type: string
+        default: './todoapp/values.yaml'
+      helm-release-name:
+        default: todoapp
+        type: string
 
 jobs:
-  python-ci:
+  deploy-helm:
+    name: Deploy to ${{ inputs.environment }}
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./src
+    environment: 
+      name: ${{ inputs.environment }}
+      url: https://github.com/${{ github.repository }}/deployments
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ env.PythonVersion }}
-        uses: actions/setup-python@v4
+      - uses: actions/download-artifact@v4
         with:
-          python-version: ${{ env.PythonVersion }}
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install coverage flake8
-          pip install -r requirements.txt
-
-      - name: Run tests
-        run: |
-          python manage.py test
-
-      - name: Generate Report
-        run: |
-          coverage run --source='.' manage.py test
-          coverage report
-
-      - name: Linting
-        run: |
-          flake8 . --show-source --statistics --exit-zero
-
-      - name: Check Complexity
-        run: |
-          flake8 . --exit-zero --max-complexity=6
-
-      - name: Upload python artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-artifacts
+          name: helm-package
           path: .
 
-      - name: Upload helm artifacts
-        if: github.ref_name == 'main'
-        uses: actions/upload-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: helm-artifacts
-          path: ${{ github.workspace }}/helm-charts
+          path: .
 
-      - name: Upload kind cluster artifact
-        if: github.ref_name == 'main'
-        uses: actions/upload-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: kind-cluster
-          path: ${{ github.workspace }}/cluster.yml
+          path: .
 
-  docker-ci:
-    name: Build and Push Image
-    runs-on: ubuntu-latest
-    if: ${{ github.ref_name == 'main' }}
-    needs: python-ci
-    steps:
+      - uses: azure/setup-helm@v4.2.0
+      - uses: azure/setup-kubectl@v4
 
-    - uses: actions/download-artifact@v4
-      name: Download python artifacts
-      with:
-        name: python-artifacts
-        path: .
+      - uses: helm/kind-action@v1
+        with:
+          config: ./cluster.yml
 
-    - name: Login to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Dry Run Helm
+        run: |
+          helm install --dry-run ${{ inputs.helm-release-name }} ./todoapp-*.tgz  \
+          -f ${{ inputs.helm-values-path }} \
+          --set mysql.secrets.MYSQL_ROOT_PASSWORD="${{ secrets.MYSQL_ROOT_PASSWORD }}" \
+          --set mysql.secrets.MYSQL_USER="${{ secrets.MYSQL_USER }}" \
+          --set mysql.secrets.MYSQL_PASSWORD="${{ secrets.MYSQL_PASSWORD }}" \
+          --set todoapp.secrets.SECRET_KEY="${{ secrets.APP_SECRET_KEY }}" \
+          --set todoapp.secrets.DB_NAME="${{ secrets.APP_DB_NAME }}" \
+          --set todoapp.secrets.DB_USER="${{ secrets.MYSQL_USER }}" \
+          --set todoapp.secrets.DB_PASSWORD="${{ secrets.MYSQL_PASSWORD }}" \
+          --set todoapp.secrets.DB_HOST="${{ secrets.APP_DB_HOST }}" \
+          --set todoapp.image.tag=${{ inputs.version }}
 
-    - name: Build and push
-      uses: docker/build-push-action@v5
-      with:
-        push: true
-        context: ./src
-        tags: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DockerImageName }}:${{ github.sha }}
-
-  helm-ci:
-    runs-on: ubuntu-latest
-    needs: python-ci
-    if: github.ref_name == 'main'
-    name: Helm CI
-    steps:
-
-    - uses: actions/download-artifact@v4
-      with:
-        name: helm-artifacts
-        path: .
-
-    - name: Set Up Helm
-      uses: azure/setup-helm@v4.2.0
-
-    - name: Lint helm
-      run: helm lint ./todoapp/
-
-    - name: Template Helm
-      run: helm template todoapp ./todoapp/ -f ./todoapp/values.yaml
-
-    - name: Package Helm
-      run: helm package ./todoapp
-
-    - name: Upload Helm Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: helm-package
-        path: ./*.tgz
-
-  deploy-helm-dev:
-    name: Deploy helm to Development
-    uses: ./.github/workflows/reusable-deployment.yml
-    needs: [helm-ci, docker-ci]
-    secrets: inherit
-    with:
-      environment: development
-      version: ${{ github.sha }}
-
-  deploy-helm-stg:
-    name: Deploy helm to Staging
-    uses: ./.github/workflows/reusable-deployment.yml
-    needs: [deploy-helm-dev]
-    secrets: inherit
-    with:
-      environment: staging
-      version: ${{ github.sha }}
-      helm-values-path: ./todoapp/values/stg.yaml
-      helm-release-name: todoapp-staging
+      - name: Deploy helm
+        run: |
+          helm upgrade --install --wait --timeout 180s --debug ${{ inputs.helm-release-name }} ./todoapp-*.tgz \
+          -f ${{ inputs.helm-values-path }} \
+          --set mysql.secrets.MYSQL_ROOT_PASSWORD="${{ secrets.MYSQL_ROOT_PASSWORD }}" \
+          --set mysql.secrets.MYSQL_USER="${{ secrets.MYSQL_USER }}" \
+          --set mysql.secrets.MYSQL_PASSWORD="${{ secrets.MYSQL_PASSWORD }}" \
+          --set todoapp.secrets.SECRET_KEY="${{ secrets.APP_SECRET_KEY }}" \
+          --set todoapp.secrets.DB_NAME="${{ secrets.APP_DB_NAME }}" \
+          --set todoapp.secrets.DB_USER="${{ secrets.MYSQL_USER }}" \
+          --set todoapp.secrets.DB_PASSWORD="${{ secrets.MYSQL_PASSWORD }}" \
+          --set todoapp.secrets.DB_HOST="${{ secrets.APP_DB_HOST }}" \
+          --set todoapp.image.tag=${{ inputs.version }}
