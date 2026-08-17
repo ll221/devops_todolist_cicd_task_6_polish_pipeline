@@ -20,7 +20,7 @@ on:
 jobs:
   deploy-helm:
     runs-on: ubuntu-latest
-    environment: 
+    environment:
       name: ${{ inputs.environment }}
       url: https://github.com/${{ github.repository }}/deployments
 
